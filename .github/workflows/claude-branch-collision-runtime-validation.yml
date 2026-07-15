@@ -275,10 +275,11 @@ jobs:
           server.serve_forever()
           PY
 
-          echo '{"count": 0, "paths": []}' > "$RUNNER_TEMP/h1_067_mock_state.json"
+          export H1_067_MOCK_STATE_FILE="$RUNNER_TEMP/h1_067_mock_state.json"
+          echo '{"count": 0, "paths": []}' > "$H1_067_MOCK_STATE_FILE"
           nohup python3 "$RUNNER_TEMP/h1_067_anthropic_mock.py" > "$RUNNER_TEMP/h1_067_mock.log" 2>&1 &
           echo "H1_067_MOCK_PID=$!" >> "$GITHUB_ENV"
-          echo "H1_067_MOCK_STATE_FILE=$RUNNER_TEMP/h1_067_mock_state.json" >> "$GITHUB_ENV"
+          echo "H1_067_MOCK_STATE_FILE=$H1_067_MOCK_STATE_FILE" >> "$GITHUB_ENV"
           echo "ANTHROPIC_BASE_URL=http://127.0.0.1:8765" >> "$GITHUB_ENV"
           for _ in $(seq 1 20); do
             if curl -fsS http://127.0.0.1:8765/health >/dev/null; then
