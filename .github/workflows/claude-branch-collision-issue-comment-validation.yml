@@ -40,17 +40,28 @@ jobs:
           is_cross_repository="$(jq -r '.isCrossRepository' <<<"$pr_json")"
           head_repo="${head_owner}/${head_repo_name}"
 
-          if [[ "$base_branch" != "victim-067" ]]; then
+          if [[ "$base_branch" != victim-067* ]]; then
             echo "::error::unexpected base branch: $base_branch"
             exit 1
           fi
-          if [[ "$head_branch" != "victim-067" ]]; then
+          if [[ "$head_branch" != victim-067* ]]; then
             echo "::error::unexpected head branch: $head_branch"
+            exit 1
+          fi
+          if [[ "$base_branch" != "$head_branch" ]]; then
+            echo "::error::base/head branch names do not collide: $base_branch vs $head_branch"
             exit 1
           fi
           if [[ "$is_cross_repository" != "true" ]]; then
             echo "::error::PR is not cross-repository"
             exit 1
+          fi
+
+          if [[ "$head_branch" == "victim-067" ]]; then
+            attacker_file="ATTACKER_MARKER.txt"
+          else
+            suffix="${head_branch#victim-067-}"
+            attacker_file="ATTACKER_MARKER_067_${suffix^^}.txt"
           fi
 
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
@@ -59,6 +70,7 @@ jobs:
           echo "head_repo=$head_repo" >> "$GITHUB_OUTPUT"
           echo "pr_author=$pr_author" >> "$GITHUB_OUTPUT"
           echo "is_cross_repository=$is_cross_repository" >> "$GITHUB_OUTPUT"
+          echo "attacker_file=$attacker_file" >> "$GITHUB_OUTPUT"
 
       - name: Capture branch tips before action
         id: before
@@ -81,6 +93,8 @@ jobs:
           persist-credentials: true
 
       - name: Start local Anthropic API mock
+        env:
+          H1_067_PUSH_BRANCH: ${{ steps.pr.outputs.head_branch }}
         run: |
           set -euo pipefail
           cat > "$RUNNER_TEMP/h1_067_anthropic_mock.py" <<'PY'
@@ -191,9 +205,11 @@ jobs:
                   state.setdefault("paths", []).append(self.path)
                   write_state(state)
 
+                  push_branch = os.environ["H1_067_PUSH_BRANCH"]
+
                   if state["count"] <= 5:
                       body = sse_tool("Bash", "toolu_h1_067_push", {
-                          "command": "git push origin victim-067",
+                          "command": f"git push origin {push_branch}",
                           "description": "push H1 067 collision branch",
                       })
                   else:
@@ -238,7 +254,7 @@ jobs:
           anthropic_api_key: H1_FAKE_ANTHROPIC_API_KEY_067
           use_sticky_comment: false
           claude_args: >-
-            --allowedTools "Bash(git push origin victim-067)"
+            --allowedTools "Bash(git push origin ${{ steps.pr.outputs.head_branch }})"
 
       - name: Capture branch tips after action
         id: after
@@ -268,11 +284,12 @@ jobs:
           FORK_BEFORE: ${{ steps.before.outputs.fork_branch_before }}
           BASE_AFTER: ${{ steps.after.outputs.base_branch_after }}
           FORK_AFTER: ${{ steps.after.outputs.fork_branch_after }}
+          ATTACKER_FILE: ${{ steps.pr.outputs.attacker_file }}
         run: |
           set -euo pipefail
 
           base_contains_attacker=false
-          if gh api "repos/${GITHUB_REPOSITORY}/contents/ATTACKER_MARKER.txt?ref=${BASE_BRANCH}" --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d | grep -F "$H1_067_ATTACKER_MARKER" >/dev/null; then
+          if gh api "repos/${GITHUB_REPOSITORY}/contents/${ATTACKER_FILE}?ref=${BASE_BRANCH}" --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d | grep -F "$H1_067_ATTACKER_MARKER" >/dev/null; then
             base_contains_attacker=true
           fi
 
@@ -297,6 +314,7 @@ jobs:
             --arg fork_before "$FORK_BEFORE" \
             --arg base_after "$BASE_AFTER" \
             --arg fork_after "$FORK_AFTER" \
+            --arg attacker_file "$ATTACKER_FILE" \
             --arg mock_state "$(cat "$H1_067_MOCK_STATE_FILE" 2>/dev/null || printf '{}')" \
             --argjson base_contains_attacker "$base_contains_attacker" \
             '{
@@ -327,6 +345,7 @@ jobs:
                 base_branch_after: $base_after,
                 fork_branch_before: $fork_before,
                 fork_branch_after: $fork_after,
+                attacker_marker_file: $attacker_file,
                 base_repo_collision_branch_changed: ($base_before != $base_after),
                 fork_branch_changed: ($fork_before != $fork_after),
                 local_mock_anthropic_api_used: true,
