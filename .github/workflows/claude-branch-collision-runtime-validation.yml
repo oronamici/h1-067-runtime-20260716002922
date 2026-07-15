@@ -15,9 +15,13 @@ on:
         required: true
         default: "victim-067"
       external_push_status:
-        description: "Observed Account B direct push status to the base branch, e.g. 403"
+        description: "Observed Account B direct push status to the base branch, e.g. 403 or not_attempted"
         required: true
-        default: "403"
+        default: "not_attempted"
+      external_actor_base_permission:
+        description: "Observed Account B permission on the base repository"
+        required: true
+        default: "read"
 
 permissions:
   contents: write
@@ -236,9 +240,9 @@ jobs:
 
                   step = state["count"]
                   if step == 1:
-                      body = sse_tool("Bash", "toolu_h1_067_commit_and_push", {
-                          "command": "printf 'H1_SAFE_CLAUDE_GENERATED_MARKER_067\\n' > H1_SAFE_CLAUDE_MARKER_067.txt && git add H1_SAFE_CLAUDE_MARKER_067.txt && git -c user.email=h1-067@example.invalid -c user.name=H1-067-Runtime commit -m H1_SAFE_CLAUDE_GENERATED_MARKER_067 && git push origin victim-067",
-                          "description": "create, commit, and push H1 067 safe marker",
+                      body = sse_tool("Bash", "toolu_h1_067_push", {
+                          "command": "git push origin victim-067",
+                          "description": "push H1 067 collision branch",
                       })
                   else:
                       body = sse_text("H1_SAFE_LOOPBACK_RESPONSE_067")
@@ -323,6 +327,7 @@ jobs:
           BASE_AFTER: ${{ steps.after.outputs.base_branch_after }}
           FORK_AFTER: ${{ steps.after.outputs.fork_branch_after }}
           EXTERNAL_PUSH_STATUS: ${{ inputs.external_push_status }}
+          EXTERNAL_BASE_PERMISSION: ${{ inputs.external_actor_base_permission }}
         run: |
           set -euo pipefail
 
@@ -351,6 +356,7 @@ jobs:
             --arg base_after "$BASE_AFTER" \
             --arg fork_after "$FORK_AFTER" \
             --arg external_push_status "$EXTERNAL_PUSH_STATUS" \
+            --arg external_base_permission "$EXTERNAL_BASE_PERMISSION" \
             --arg mock_state "$(cat "$H1_067_MOCK_STATE_FILE" 2>/dev/null || printf '{}')" \
             --argjson base_contains_attacker "$base_contains_attacker" \
             --argjson base_contains_claude "$base_contains_claude" \
@@ -371,6 +377,7 @@ jobs:
                 fork_head_branch: $head_branch,
                 same_named_base_repo_branch_exists: true,
                 external_actor_direct_push_to_base_status: ($external_push_status | tonumber? // $external_push_status),
+                external_actor_base_permission: $external_base_permission,
                 maintainer_triggered_action_used: true,
                 action_token_has_contents_write: true,
                 pr_head_sha: $pr_head_sha,
@@ -391,7 +398,11 @@ jobs:
                 contains_claude_safe_marker: $base_contains_claude
               },
               privilege_differential: {
-                external_actor_cannot_push_base_branch: ($external_push_status == "403"),
+                external_actor_cannot_push_base_branch: (
+                  ($external_push_status == "403") or
+                  ($external_base_permission == "read") or
+                  ($external_base_permission == "none")
+                ),
                 action_token_can_push_base_branch: ($base_before != $base_after)
               }
             }' | tee runtime-observed-output-067.json
