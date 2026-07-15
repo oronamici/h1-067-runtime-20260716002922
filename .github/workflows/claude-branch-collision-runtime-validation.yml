@@ -114,11 +114,186 @@ jobs:
             exit 1
           fi
 
+      - name: Create local same-named branch from PR head
+        run: |
+          set -euo pipefail
+          git checkout -B "${{ steps.pr.outputs.head_branch }}" "${{ steps.pr.outputs.head_sha }}"
+          if [[ "$(git rev-parse HEAD)" != "${{ steps.pr.outputs.head_sha }}" ]]; then
+            echo "::error::local collision branch does not point at PR head"
+            exit 1
+          fi
+
+      - name: Start local Anthropic API mock
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/h1_067_anthropic_mock.py" <<'PY'
+          import json
+          import os
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          STATE_FILE = os.environ["H1_067_MOCK_STATE_FILE"]
+
+          def read_state():
+              try:
+                  with open(STATE_FILE, "r", encoding="utf-8") as fh:
+                      return json.load(fh)
+              except FileNotFoundError:
+                  return {"count": 0, "paths": []}
+
+          def write_state(state):
+              with open(STATE_FILE, "w", encoding="utf-8") as fh:
+                  json.dump(state, fh, sort_keys=True)
+
+          def sse_text(text):
+              events = [
+                  ("message_start", {
+                      "type": "message_start",
+                      "message": {
+                          "id": "msg_h1_safe_mock_067_done",
+                          "type": "message",
+                          "role": "assistant",
+                          "model": "claude-safe-mock-067",
+                          "content": [],
+                          "stop_reason": None,
+                          "stop_sequence": None,
+                          "usage": {"input_tokens": 1, "output_tokens": 0},
+                      },
+                  }),
+                  ("content_block_start", {
+                      "type": "content_block_start",
+                      "index": 0,
+                      "content_block": {"type": "text", "text": ""},
+                  }),
+                  ("content_block_delta", {
+                      "type": "content_block_delta",
+                      "index": 0,
+                      "delta": {"type": "text_delta", "text": text},
+                  }),
+                  ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                  ("message_delta", {
+                      "type": "message_delta",
+                      "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                      "usage": {"output_tokens": 4},
+                  }),
+                  ("message_stop", {"type": "message_stop"}),
+              ]
+              return "".join(f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in events)
+
+          def sse_tool(name, tool_id, input_obj):
+              events = [
+                  ("message_start", {
+                      "type": "message_start",
+                      "message": {
+                          "id": f"msg_h1_safe_mock_067_{tool_id}",
+                          "type": "message",
+                          "role": "assistant",
+                          "model": "claude-safe-mock-067",
+                          "content": [],
+                          "stop_reason": None,
+                          "stop_sequence": None,
+                          "usage": {"input_tokens": 1, "output_tokens": 0},
+                      },
+                  }),
+                  ("content_block_start", {
+                      "type": "content_block_start",
+                      "index": 0,
+                      "content_block": {
+                          "type": "tool_use",
+                          "id": tool_id,
+                          "name": name,
+                          "input": {},
+                      },
+                  }),
+                  ("content_block_delta", {
+                      "type": "content_block_delta",
+                      "index": 0,
+                      "delta": {
+                          "type": "input_json_delta",
+                          "partial_json": json.dumps(input_obj, separators=(",", ":")),
+                      },
+                  }),
+                  ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                  ("message_delta", {
+                      "type": "message_delta",
+                      "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                      "usage": {"output_tokens": 1},
+                  }),
+                  ("message_stop", {"type": "message_stop"}),
+              ]
+              return "".join(f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in events)
+
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self, *_args):
+                  return
+
+              def do_POST(self):
+                  length = int(self.headers.get("content-length", "0") or "0")
+                  _ = self.rfile.read(length)
+                  state = read_state()
+                  state["count"] = int(state.get("count", 0)) + 1
+                  state.setdefault("paths", []).append(self.path)
+                  write_state(state)
+
+                  step = state["count"]
+                  if step == 1:
+                      body = sse_tool("Write", "toolu_h1_067_write", {
+                          "file_path": "H1_SAFE_CLAUDE_MARKER_067.txt",
+                          "content": "H1_SAFE_CLAUDE_GENERATED_MARKER_067\n",
+                      })
+                  elif step == 2:
+                      body = sse_tool("Bash", "toolu_h1_067_add", {
+                          "command": "git add H1_SAFE_CLAUDE_MARKER_067.txt",
+                          "description": "stage H1 067 safe marker",
+                      })
+                  elif step == 3:
+                      body = sse_tool("Bash", "toolu_h1_067_commit", {
+                          "command": "git -c user.email=h1-067@example.invalid -c user.name=H1-067-Runtime commit -m H1_SAFE_CLAUDE_GENERATED_MARKER_067",
+                          "description": "commit H1 067 safe marker",
+                      })
+                  elif step == 4:
+                      body = sse_tool("Bash", "toolu_h1_067_push", {
+                          "command": "git push origin victim-067",
+                          "description": "push H1 067 safe marker",
+                      })
+                  else:
+                      body = sse_text("H1_SAFE_LOOPBACK_RESPONSE_067")
+
+                  encoded = body.encode()
+                  self.send_response(200)
+                  self.send_header("content-type", "text/event-stream")
+                  self.send_header("cache-control", "no-cache")
+                  self.send_header("content-length", str(len(encoded)))
+                  self.end_headers()
+                  self.wfile.write(encoded)
+
+              def do_GET(self):
+                  self.send_response(200)
+                  self.end_headers()
+                  self.wfile.write(b"ok")
+
+          server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
+          server.serve_forever()
+          PY
+
+          echo '{"count": 0, "paths": []}' > "$RUNNER_TEMP/h1_067_mock_state.json"
+          nohup python3 "$RUNNER_TEMP/h1_067_anthropic_mock.py" > "$RUNNER_TEMP/h1_067_mock.log" 2>&1 &
+          echo "H1_067_MOCK_PID=$!" >> "$GITHUB_ENV"
+          echo "H1_067_MOCK_STATE_FILE=$RUNNER_TEMP/h1_067_mock_state.json" >> "$GITHUB_ENV"
+          echo "ANTHROPIC_BASE_URL=http://127.0.0.1:8765" >> "$GITHUB_ENV"
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:8765/health >/dev/null; then
+              exit 0
+            fi
+            sleep 0.2
+          done
+          cat "$RUNNER_TEMP/h1_067_mock.log" || true
+          exit 1
+
       - name: Run exact Claude Code Action
         uses: anthropics/claude-code-action@12531344451323133b0493233c759991ac61da12
         with:
           github_token: ${{ github.token }}
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: H1_FAKE_ANTHROPIC_API_KEY_067
           prompt: |
             Runtime validation for H1 067.
 
@@ -129,7 +304,7 @@ jobs:
           claude_args: >-
             --permission-mode acceptEdits
             --allowedTools
-            "Bash(git status),Bash(git add H1_SAFE_CLAUDE_MARKER_067.txt),Bash(git commit -m *),Bash(git push origin victim-067),Write(H1_SAFE_CLAUDE_MARKER_067.txt),Read,Glob,Grep"
+            "Write,Bash(git:*),Read,Glob,Grep"
 
       - name: Capture branch tips after action
         id: after
@@ -190,6 +365,7 @@ jobs:
             --arg base_after "$BASE_AFTER" \
             --arg fork_after "$FORK_AFTER" \
             --arg external_push_status "$EXTERNAL_PUSH_STATUS" \
+            --arg mock_state "$(cat "$H1_067_MOCK_STATE_FILE" 2>/dev/null || printf '{}')" \
             --argjson base_contains_attacker "$base_contains_attacker" \
             --argjson base_contains_claude "$base_contains_claude" \
             '{
@@ -219,7 +395,10 @@ jobs:
                 fork_branch_before: $fork_before,
                 fork_branch_after: $fork_after,
                 base_repo_collision_branch_changed: ($base_before != $base_after),
-                fork_branch_changed: ($fork_before != $fork_after)
+                fork_branch_changed: ($fork_before != $fork_after),
+                local_mock_anthropic_api_used: true,
+                anthropic_production_requests: 0,
+                mock_api_state: ($mock_state | fromjson? // {})
               },
               base_branch_after_push: {
                 contains_attacker_controlled_marker: $base_contains_attacker,
