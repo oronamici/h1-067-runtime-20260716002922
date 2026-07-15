@@ -236,24 +236,9 @@ jobs:
 
                   step = state["count"]
                   if step == 1:
-                      body = sse_tool("Bash", "toolu_h1_067_write", {
-                          "command": "printf 'H1_SAFE_CLAUDE_GENERATED_MARKER_067\\n' > H1_SAFE_CLAUDE_MARKER_067.txt",
-                          "description": "write H1 067 safe marker",
-                      })
-                  elif step == 2:
-                      body = sse_tool("Bash", "toolu_h1_067_add", {
-                          "command": "git add H1_SAFE_CLAUDE_MARKER_067.txt",
-                          "description": "stage H1 067 safe marker",
-                      })
-                  elif step == 3:
-                      body = sse_tool("Bash", "toolu_h1_067_commit", {
-                          "command": "git -c user.email=h1-067@example.invalid -c user.name=H1-067-Runtime commit -m H1_SAFE_CLAUDE_GENERATED_MARKER_067",
-                          "description": "commit H1 067 safe marker",
-                      })
-                  elif step == 4:
-                      body = sse_tool("Bash", "toolu_h1_067_push", {
-                          "command": "git push origin victim-067",
-                          "description": "push H1 067 safe marker",
+                      body = sse_tool("Bash", "toolu_h1_067_commit_and_push", {
+                          "command": "printf 'H1_SAFE_CLAUDE_GENERATED_MARKER_067\\n' > H1_SAFE_CLAUDE_MARKER_067.txt && git add H1_SAFE_CLAUDE_MARKER_067.txt && git -c user.email=h1-067@example.invalid -c user.name=H1-067-Runtime commit -m H1_SAFE_CLAUDE_GENERATED_MARKER_067 && git push origin victim-067",
+                          "description": "create, commit, and push H1 067 safe marker",
                       })
                   else:
                       body = sse_text("H1_SAFE_LOOPBACK_RESPONSE_067")
