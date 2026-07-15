@@ -236,9 +236,9 @@ jobs:
 
                   step = state["count"]
                   if step == 1:
-                      body = sse_tool("Write", "toolu_h1_067_write", {
-                          "file_path": "H1_SAFE_CLAUDE_MARKER_067.txt",
-                          "content": "H1_SAFE_CLAUDE_GENERATED_MARKER_067\n",
+                      body = sse_tool("Bash", "toolu_h1_067_write", {
+                          "command": "printf 'H1_SAFE_CLAUDE_GENERATED_MARKER_067\\n' > H1_SAFE_CLAUDE_MARKER_067.txt",
+                          "description": "write H1 067 safe marker",
                       })
                   elif step == 2:
                       body = sse_tool("Bash", "toolu_h1_067_add", {
@@ -305,7 +305,7 @@ jobs:
           claude_args: >-
             --permission-mode acceptEdits
             --allowedTools
-            "Write,Bash(git:*),Read,Glob,Grep"
+            "Bash(*),Read,Glob,Grep"
 
       - name: Capture branch tips after action
         id: after
