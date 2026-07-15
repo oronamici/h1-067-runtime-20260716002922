@@ -239,7 +239,7 @@ jobs:
                   write_state(state)
 
                   step = state["count"]
-                  if step == 1:
+                  if step <= 5:
                       body = sse_tool("Bash", "toolu_h1_067_push", {
                           "command": "git push origin victim-067",
                           "description": "push H1 067 collision branch",
