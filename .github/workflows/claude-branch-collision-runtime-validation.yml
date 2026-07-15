@@ -333,10 +333,10 @@ jobs:
 
           base_contains_attacker=false
           base_contains_claude=false
-          if gh api "repos/${GITHUB_REPOSITORY}/contents/ATTACKER_MARKER.txt?ref=${BASE_BRANCH}" --jq '.content' 2>/dev/null | base64 -d | grep -F "$H1_067_ATTACKER_MARKER" >/dev/null; then
+          if gh api "repos/${GITHUB_REPOSITORY}/contents/ATTACKER_MARKER.txt?ref=${BASE_BRANCH}" --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d | grep -F "$H1_067_ATTACKER_MARKER" >/dev/null; then
             base_contains_attacker=true
           fi
-          if gh api "repos/${GITHUB_REPOSITORY}/contents/${H1_067_CLAUDE_MARKER_FILE}?ref=${BASE_BRANCH}" --jq '.content' 2>/dev/null | base64 -d | grep -F "$H1_067_CLAUDE_MARKER" >/dev/null; then
+          if gh api "repos/${GITHUB_REPOSITORY}/contents/${H1_067_CLAUDE_MARKER_FILE}?ref=${BASE_BRANCH}" --jq '.content' 2>/dev/null | tr -d '\n' | base64 -d | grep -F "$H1_067_CLAUDE_MARKER" >/dev/null; then
             base_contains_claude=true
           fi
 
