@@ -1,0 +1,232 @@
+name: H1 067 branch collision runtime validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Fork PR number to validate"
+        required: true
+      expected_base_branch:
+        description: "Disposable base branch expected to collide"
+        required: true
+        default: "victim-067"
+      expected_head_branch:
+        description: "Fork head branch expected to collide"
+        required: true
+        default: "victim-067"
+      external_push_status:
+        description: "Observed Account B direct push status to the base branch, e.g. 403"
+        required: true
+        default: "403"
+
+permissions:
+  contents: write
+  pull-requests: read
+  issues: write
+
+env:
+  H1_067_ATTACKER_MARKER: H1_SAFE_ATTACKER_CONTROLLED_MARKER_067
+  H1_067_CLAUDE_MARKER: H1_SAFE_CLAUDE_GENERATED_MARKER_067
+  H1_067_CLAUDE_MARKER_FILE: H1_SAFE_CLAUDE_MARKER_067.txt
+
+jobs:
+  runtime-validation:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Capture PR metadata before checkout
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          pr_json="$(gh pr view "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json author,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository)"
+
+          echo "$pr_json" | jq .
+
+          base_branch="$(jq -r '.baseRefName' <<<"$pr_json")"
+          head_branch="$(jq -r '.headRefName' <<<"$pr_json")"
+          head_sha="$(jq -r '.headRefOid' <<<"$pr_json")"
+          head_owner="$(jq -r '.headRepositoryOwner.login' <<<"$pr_json")"
+          head_repo_name="$(jq -r '.headRepository.name' <<<"$pr_json")"
+          pr_author="$(jq -r '.author.login' <<<"$pr_json")"
+          is_cross_repository="$(jq -r '.isCrossRepository' <<<"$pr_json")"
+          head_repo="${head_owner}/${head_repo_name}"
+
+          if [[ "$base_branch" != "${{ inputs.expected_base_branch }}" ]]; then
+            echo "::error::unexpected base branch: $base_branch"
+            exit 1
+          fi
+          if [[ "$head_branch" != "${{ inputs.expected_head_branch }}" ]]; then
+            echo "::error::unexpected head branch: $head_branch"
+            exit 1
+          fi
+          if [[ "$is_cross_repository" != "true" ]]; then
+            echo "::error::PR is not cross-repository"
+            exit 1
+          fi
+
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+          echo "head_branch=$head_branch" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "head_repo=$head_repo" >> "$GITHUB_OUTPUT"
+          echo "pr_author=$pr_author" >> "$GITHUB_OUTPUT"
+          echo "is_cross_repository=$is_cross_repository" >> "$GITHUB_OUTPUT"
+
+      - name: Capture branch tips before action
+        id: before
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ steps.pr.outputs.base_branch }}
+          HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
+        run: |
+          set -euo pipefail
+          base_before="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BASE_BRANCH}" --jq '.object.sha')"
+          fork_before="$(gh api "repos/${HEAD_REPO}/git/ref/heads/${HEAD_BRANCH}" --jq '.object.sha')"
+          echo "base_branch_before=$base_before" >> "$GITHUB_OUTPUT"
+          echo "fork_branch_before=$fork_before" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ inputs.pr_number }}/head
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Validate checked out PR head
+        id: checkout_identity
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          echo "checked_out_sha=$actual_sha" >> "$GITHUB_OUTPUT"
+          if [[ "$actual_sha" != "${{ steps.pr.outputs.head_sha }}" ]]; then
+            echo "::error::checked out SHA does not match PR head SHA"
+            exit 1
+          fi
+
+          if ! git grep -F "$H1_067_ATTACKER_MARKER" HEAD -- . >/dev/null; then
+            echo "::error::attacker marker is not present in PR head"
+            exit 1
+          fi
+
+      - name: Run exact Claude Code Action
+        uses: anthropics/claude-code-action@12531344451323133b0493233c759991ac61da12
+        with:
+          github_token: ${{ github.token }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Runtime validation for H1 067.
+
+            Create a file named H1_SAFE_CLAUDE_MARKER_067.txt with exactly this content:
+            H1_SAFE_CLAUDE_GENERATED_MARKER_067
+
+            Commit that file and push it to the existing PR branch. Do not create a new branch.
+          claude_args: >-
+            --permission-mode acceptEdits
+            --allowedTools
+            "Bash(git status),Bash(git add H1_SAFE_CLAUDE_MARKER_067.txt),Bash(git commit -m *),Bash(git push origin victim-067),Write(H1_SAFE_CLAUDE_MARKER_067.txt),Read,Glob,Grep"
+
+      - name: Capture branch tips after action
+        id: after
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ steps.pr.outputs.base_branch }}
+          HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
+        run: |
+          set -euo pipefail
+          base_after="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BASE_BRANCH}" --jq '.object.sha')"
+          fork_after="$(gh api "repos/${HEAD_REPO}/git/ref/heads/${HEAD_BRANCH}" --jq '.object.sha')"
+          echo "base_branch_after=$base_after" >> "$GITHUB_OUTPUT"
+          echo "fork_branch_after=$fork_after" >> "$GITHUB_OUTPUT"
+
+      - name: Collect runtime evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          PR_AUTHOR: ${{ steps.pr.outputs.pr_author }}
+          BASE_BRANCH: ${{ steps.pr.outputs.base_branch }}
+          HEAD_BRANCH: ${{ steps.pr.outputs.head_branch }}
+          HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          CHECKED_OUT_SHA: ${{ steps.checkout_identity.outputs.checked_out_sha }}
+          BASE_BEFORE: ${{ steps.before.outputs.base_branch_before }}
+          FORK_BEFORE: ${{ steps.before.outputs.fork_branch_before }}
+          BASE_AFTER: ${{ steps.after.outputs.base_branch_after }}
+          FORK_AFTER: ${{ steps.after.outputs.fork_branch_after }}
+          EXTERNAL_PUSH_STATUS: ${{ inputs.external_push_status }}
+        run: |
+          set -euo pipefail
+
+          base_contains_attacker=false
+          base_contains_claude=false
+          if gh api "repos/${GITHUB_REPOSITORY}/contents/ATTACKER_MARKER.txt?ref=${BASE_BRANCH}" --jq '.content' 2>/dev/null | base64 -d | grep -F "$H1_067_ATTACKER_MARKER" >/dev/null; then
+            base_contains_attacker=true
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/contents/${H1_067_CLAUDE_MARKER_FILE}?ref=${BASE_BRANCH}" --jq '.content' 2>/dev/null | base64 -d | grep -F "$H1_067_CLAUDE_MARKER" >/dev/null; then
+            base_contains_claude=true
+          fi
+
+          jq -n \
+            --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg event_name "$GITHUB_EVENT_NAME" \
+            --arg dispatch_actor "$GITHUB_ACTOR" \
+            --arg pr_author "$PR_AUTHOR" \
+            --arg base_repo "$GITHUB_REPOSITORY" \
+            --arg head_repo "$HEAD_REPO" \
+            --arg base_branch "$BASE_BRANCH" \
+            --arg head_branch "$HEAD_BRANCH" \
+            --arg pr_head_sha "$PR_HEAD_SHA" \
+            --arg checked_out_sha "$CHECKED_OUT_SHA" \
+            --arg base_before "$BASE_BEFORE" \
+            --arg fork_before "$FORK_BEFORE" \
+            --arg base_after "$BASE_AFTER" \
+            --arg fork_after "$FORK_AFTER" \
+            --arg external_push_status "$EXTERNAL_PUSH_STATUS" \
+            --argjson base_contains_attacker "$base_contains_attacker" \
+            --argjson base_contains_claude "$base_contains_claude" \
+            '{
+              github_runtime_validation: {
+                performed: true,
+                researcher_owned_base_repo: true,
+                external_test_account_used: ($dispatch_actor != $pr_author),
+                fork_pr_used: ($base_repo != $head_repo),
+                external_actor_is_collaborator: false,
+                event_name: $event_name,
+                actions_run_url: $run_url,
+                dispatch_actor: $dispatch_actor,
+                pr_author: $pr_author,
+                base_repository: $base_repo,
+                head_repository: $head_repo,
+                pr_base_branch: $base_branch,
+                fork_head_branch: $head_branch,
+                same_named_base_repo_branch_exists: true,
+                external_actor_direct_push_to_base_status: ($external_push_status | tonumber? // $external_push_status),
+                maintainer_triggered_action_used: true,
+                action_token_has_contents_write: true,
+                pr_head_sha: $pr_head_sha,
+                checked_out_sha: $checked_out_sha,
+                checked_out_sha_equals_pr_head_sha: ($checked_out_sha == $pr_head_sha),
+                base_branch_before: $base_before,
+                base_branch_after: $base_after,
+                fork_branch_before: $fork_before,
+                fork_branch_after: $fork_after,
+                base_repo_collision_branch_changed: ($base_before != $base_after),
+                fork_branch_changed: ($fork_before != $fork_after)
+              },
+              base_branch_after_push: {
+                contains_attacker_controlled_marker: $base_contains_attacker,
+                contains_claude_safe_marker: $base_contains_claude
+              },
+              privilege_differential: {
+                external_actor_cannot_push_base_branch: ($external_push_status == "403"),
+                action_token_can_push_base_branch: ($base_before != $base_after)
+              }
+            }' | tee runtime-observed-output-067.json
